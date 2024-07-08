@@ -141,7 +141,7 @@ class RS485SerialInterfaceV2(BusInterface, threading.Thread):
                         self._fire_status_change_handler(connected=True)
 
                     # send messages
-                    while not self.transmit.empty(): 
+                    if not self.transmit.empty(): 
                         ser_msg = self.transmit.get()
                         # dropp old messages
                         if ser_msg[0] < time.time() - 30:
