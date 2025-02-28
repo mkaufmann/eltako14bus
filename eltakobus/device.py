@@ -2,8 +2,12 @@ from collections import defaultdict, namedtuple
 from enum import IntEnum
 import asyncio
 import binascii
+from logging import Logger
 import random
 import yaml
+
+from eltakobus import locking
+from eltakobus.serial import RS485SerialInterfaceV2
 
 from .util import b2a, b2s, AddressExpression
 from .message import *
@@ -195,7 +199,6 @@ class SensorInfo():
         self.in_func_group = in_func_group
         self.memory_line = memory_line
     
-
 class BusObject:
     sensor_address_range = None
     discovery_names = []
@@ -311,6 +314,42 @@ class BusObject:
                                     ))
                         ch = ch >> 1
                         address_off_set += 1
+
+        return result
+    
+    async def get_registered_dali_devices(self, sensor_range:range, in_func_group:int) -> list[SensorInfo]:
+        result = []
+        for i in sensor_range:
+            mem_line:bytes = await self.read_mem_line(i)
+            s_adr:bytes = mem_line[0:4]
+            key = int(mem_line[4])
+            func = int(mem_line[5])
+            ch = int(mem_line[6])   # dali group address
+            if ch < 15: 
+                # translate into channels (channels: 1-16, dali groups: 0-15 + 16 = broadcast
+                ch_start = ch + 1
+                ch_end = ch + 2
+            else:
+                ch_start = 1
+                ch_end = 17
+
+            if int.from_bytes(s_adr, "big") > 0:
+
+                for ch_i in range(ch_start, ch_end):
+                    dev_adr:int = self.address + ch_i -1
+
+                    result.append(
+                        SensorInfo(
+                            dev_type = self.__class__.__name__,
+                            sensor_id = s_adr,
+                            dev_adr = dev_adr.to_bytes(4, byteorder = 'big'),
+                            key = key,
+                            dev_id = int(self.address),
+                            key_func = func,
+                            channel = ch_i,
+                            in_func_group=in_func_group,
+                            memory_line=i
+                            ))
 
         return result
     
@@ -585,18 +624,19 @@ class HasProgrammableRPS:
         memory_range = self.programmable_rps
         if profile in [F6_02_01, F6_02_02]:
             a, discriminator = source
-            if discriminator == "left":
-                # programmed as function 3, key is 5 for left
-                expected_line = a + bytes((5, 3, 1 << subchannel, 0))
-            elif discriminator == 'right':
+            #default left
+            if discriminator == "right":
                 # programmed as function 3, key is 6 for right
                 expected_line = a + bytes((6, 3, 1 << subchannel, 0))
             else:
-                raise ValueError("Unknown discriminator on address %s" % (source,))
+                # programmed as function 3, key is 5 for left
+                expected_line = a + bytes((5, 3, 1 << subchannel, 0))
+
         elif profile in [A5_38_08, H5_3F_7F]:
             a, discriminator = source
             # 51 GFVS = House Automation SW
             expected_line = a + bytes((0, self.gfvs_code, 1 << subchannel, 0))
+            
         elif profile in [A5_10_06]:
             a, discriminator = source
             # 65 GFVS = House Automation SW
@@ -636,16 +676,15 @@ class HasProgrammableRPS:
         await self.bus.send(ESP2Message(b"\x0b\x05" + bytes([db0]) + b"\0\0\0" + sender + b"\30"))
 
 class FSR14(BusObject, HasProgrammableRPS):
+    sensor_address_range = range(8, 127)
+    sensors_func_group_1 = range(8,12)
+    sensors_func_group_2 = range(12,127)
+    gfvs_code = KeyFunction.SWITCHING_STATE_FROM_CONTROLLER
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.programmable_rps = (12, self.memory_size)
-        self.gfvs_code = KeyFunction.SWITCHING_STATE_FROM_CONTROLLER
-        self.sensors_func_group_1 = range(8,12)
-        self.sensors_func_group_2 = range(12,127)
-        self.sensor_address_range = range(8, 127)
-
-
+        
 
     async def show_off(self):
         await super().show_off()
@@ -716,6 +755,10 @@ class FSR14_1x(FSR14):
 
 class FSR14_2x(FSR14):
     discovery_names = [ bytes((0x04, 0x02)) ]
+    size = 2
+
+class FSR14M_2x(FSR14):
+    discovery_names = [ bytes((0x04, 0x0b)) ]
     size = 2
 
 class FSR14_4x(FSR14):
@@ -905,11 +948,19 @@ class FDG14(DimmerStyle):
     discovery_names = [ bytes((0x04, 0x34)) ]
     size = 16
     has_subchannels = True
+    dim_mask_scene_1_range = range(2,4)
+    dim_mask_scene_2_range = range(4,6)
+    dim_mask_scene_3_range = range(6,8)
+    dim_mask_scene_4_range = range(8,10)
+    sensor_address_range = range(14, 127)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.programmable_dimmer = (14, self.memory_size)
         self.gfvs_code = 32
+
+    async def get_all_sensors(self) -> list[SensorInfo]:
+        return await self.get_registered_dali_devices(self.sensor_address_range, 1)
 
     # Known oddities: Announces with 0e byte at payload[3] of the
     # EltakoDiscoveryReply.
@@ -934,10 +985,18 @@ class FDG14(DimmerStyle):
                 14: [
                     MemoryFileStartOfSectionComment("function group 1"),
                     MemoryFileNibbleExplanationComment(
-                         "AD DR ES S, KY FN CH V ",
-                         "key (5 = left, 6 = right), function (eg. 32 = A5-38-08), ch = channel (0x10 = broadcast), v = value (e.g. dimming in percentage, brightness)"),
+                         "AD DR ES S, KY FN DG V ",
+                         "key (5 = left, 6 = right), function (eg. 32 = A5-38-08), DG = Dali Group (0x10 = broadcast), v = value (e.g. dimming in percentage, brightness)"),
                     ],
                 }
+
+
+class FD2G14(FDG14):
+    discovery_names = [ bytes((0x04, 0x82)) ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
     
 class FAE14SSR(BusObject, HasProgrammableRPS):
     size = 2
@@ -1027,21 +1086,63 @@ class FTD14(BusObject):
 
 
 
-known_objects = [FAM14, FUD14, FUD14_800W, FSB14, FSR14_1x, FSR14_2x, FSR14_4x, F4SR14_LED, F3Z14D, FMZ14, FWG14MS, FSU14, FMSR14, FWZ14_65A, FSG14_1_10V, FGW14_USB, FDG14, FHK14, F4HK14, FAE14SSR, FTD14]
+known_objects = [FAM14, FUD14, FUD14_800W, FSB14, FSR14_1x, FSR14_2x, FSR14M_2x, FSR14_4x, F4SR14_LED, F3Z14D, FMZ14, FWG14MS, FSU14, FMSR14, FWZ14_65A, FSG14_1_10V, FGW14_USB, FDG14, FD2G14, FHK14, F4HK14, FAE14SSR, FTD14]
 # sorted so the first match of (discovery name is a prefix, size matches) can be used
 sorted_known_objects = sorted(known_objects, key=lambda o: len(o.discovery_names[0]) + 0.5 * (o.size is not None), reverse=True)
 
 async def create_busobject(bus, id):
-    response = await bus.exchange(EltakoDiscoveryRequest(address=id), EltakoDiscoveryReply)
+    response = await bus.exchange(EltakoDiscoveryRequest(address=id), EltakoDiscoveryReply, retries=5)
 
+    if response == None:
+        return
+    
     assert id == response.reported_address, "Queried for ID %s, received %s" % (id, prettify(response))
 
-    for o in sorted_known_objects:
-        if response.model[0:2] in o.discovery_names and (o.size is None or o.size == response.reported_size):
-            return o(response, bus=bus)
-    else:
-        return BusObject(response, bus=bus)
+    return get_bus_object_by_discovery_message(response, bus)
 
+
+def get_bus_object_by_discovery_message(msg: EltakoDiscoveryReply, bus:RS485SerialInterfaceV2=None):
+    for o in sorted_known_objects:
+        if msg.model[0:2] in o.discovery_names and (o.size is None or o.size == msg.reported_size):
+            return o(msg, bus=bus)
+    else:
+        return BusObject(msg, bus=bus)
+
+
+async def request_memory_of_all_devices(bus:RS485SerialInterfaceV2):
+    is_locked = False
+    __callback = bus.callback_func
+    try:
+        bus.set_callback( None )
+
+        is_locked = (await locking.lock_bus(bus)) == locking.LOCKED
+            
+        bus.send_base_id_request()
+
+        # iterate through devices
+        for id in range(1, 256):
+            dev_response:EltakoDiscoveryReply = await bus.exchange(EltakoDiscoveryRequest(address=id), EltakoDiscoveryReply, retries=3)
+            if dev_response == None:
+                break
+
+            assert id == dev_response.reported_address, "Queried for ID %s, received %s" % (id, prettify(dev_response))
+
+            __callback(dev_response)
+            asyncio.sleep(.02)
+
+            # iterate through memory lines
+            for line in range(0, dev_response.memory_size):
+                # exit if gateway is about to be deleted           
+                mem_response:EltakoMemoryResponse = await bus.exchange(EltakoMemoryRequest(dev_response.reported_address, line), EltakoMemoryResponse, retries=3)
+                __callback(mem_response)
+                asyncio.sleep(.02)
+
+    except Exception as e:
+        raise e
+    finally:
+        if is_locked:
+            resp = await locking.unlock_bus(bus)
+        bus.set_callback( __callback ) 
     
 
 class MemoryFile(defaultdict):

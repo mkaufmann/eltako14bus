@@ -1,4 +1,6 @@
 from enum import Enum
+
+from eltakobus.util import DefaultEnum
 from .error import NotImplementedError, WrongOrgError
 from .message import RPSMessage, Regular1BSMessage, Regular4BSMessage
 import re
@@ -33,6 +35,39 @@ class EEP:
 # ======================================
 # MARK: - Rocker switch
 # ======================================
+
+
+class _switch_button(EEP):
+    @classmethod
+    def decode_message(cls, msg):
+        if msg.org != 0x05:
+            raise WrongOrgError
+        
+        button_pushed = msg.data[0] == 0x10
+        
+        return cls(button_pushed)
+
+    def encode_message(self, address):
+        data = bytearray([0])
+
+        if self._button_pushed:
+            data[0] = 0x10
+        
+        status = 0x20
+        
+        return RPSMessage(address, status, data, True)
+    
+    @property
+    def button_pushed(self):
+        return self._button_pushed
+    
+    def __init__(self, button_pushed:bool=True):
+        self._button_pushed = button_pushed
+
+
+class F6_01_01(_switch_button):
+    """one button switch"""
+
 
 class _RockerSwitch(EEP):
     @classmethod
@@ -86,6 +121,8 @@ class F6_02_01(_RockerSwitch):
     
 class F6_02_02(_RockerSwitch):
     """2-part Rocker switch, Application Style 2 (US, top switches on)"""
+
+
 
 # ======================================
 # MARK: - Window handle
@@ -144,7 +181,7 @@ class _WindowHandle(EEP):
     def handle_position(self):
         return self._handle_position
 
-    def __init__(self, movement, handle_position: WindowHandlePosition):
+    def __init__(self, movement:int=0, handle_position:WindowHandlePosition=WindowHandlePosition.CLOSED):
         self._movement = movement
         self._handle_position = handle_position
 
@@ -183,7 +220,7 @@ class _SingleInputContact(EEP):
     def contact(self):
         return self._contact
 
-    def __init__(self, learn_button, contact):
+    def __init__(self, learn_button:int=1, contact:int=9):
         self._learn_button = learn_button
         self._contact = contact
 
@@ -195,6 +232,13 @@ class D5_00_01(_SingleInputContact):
 # ======================================
 
 class _LightTemperatureOccupancySensor(EEP):
+    temp_min = 0.0
+    temp_max = 51.0
+    illu_min = 0.0
+    illu_max = 510.0
+    volt_min = 0.0
+    volt_max = 5.1
+
     @classmethod
     def decode_message(cls, msg):
         if msg.org != 0x07:
@@ -253,7 +297,7 @@ class _LightTemperatureOccupancySensor(EEP):
     def occupancy_button(self):
         return self._occupancy_button
 
-    def __init__(self, supply_voltage, illumination, temperature, learn_button, pir_status, occupancy_button):
+    def __init__(self, supply_voltage:int=0, illumination:int=0, temperature:int=0, learn_button:int=1, pir_status:int=0, occupancy_button:int=0):
         self._supply_voltage = supply_voltage
         self._illumination = illumination
         self._temperature = temperature
@@ -263,12 +307,7 @@ class _LightTemperatureOccupancySensor(EEP):
 
 class A5_08_01(_LightTemperatureOccupancySensor):
     """Light, Temperature and Occupancy sensor"""
-    temp_min = 0.0
-    temp_max = 51.0
-    illu_min = 0.0
-    illu_max = 510.0
-    volt_min = 0.0
-    volt_max = 5.1
+    
 
 class VOC_Unit(Enum):
 
@@ -393,7 +432,7 @@ class _AirQualitySensor(EEP):
     def encode_message(self, address):
         raise Exception("NOT IMPLEMENTED!")
 
-    def __init__(self, concentration:float, voc_type:VOC_SubstancesType, voc_unit:VOC_Unit, learn_button):
+    def __init__(self, concentration:float=0, voc_type:VOC_SubstancesType=VOC_SubstancesType.VOCT_TOTAL, voc_unit:VOC_Unit=VOC_Unit.PPB, learn_button:int=1):
         self._concentration = concentration
         self._voc_type = voc_type
         self._voc_unit = voc_unit
@@ -598,65 +637,117 @@ class M5_38_08(_EltakoSwitchingCommand):
 # MARK: - Heating and Cooling
 # ======================================
 
-class _HeatingCooling(EEP):
-    min_temp:float = 0
-    max_temp:float = 40
+class _TempControl(EEP):
+    max_cur_temp:float = 40
+    min_des_temp:float = 8
+    max_des_temp:float = 30
     usr:float = 255.0 # unscaled range 
-
-    class Heater_Mode(Enum):
-        NORMAL = 0
-        STAND_BY_2_DEGREES = 1
-        NIGHT_SET_BACK_4_DEGREES = 2
-        OFF = 3
 
     @classmethod
     def decode_message(cls, msg):
         if msg.org == 0x07:
 
-            night_setback = msg.data[3] % 2 == 0
-            # reversed range (from 40° to 0°)
-            current_temp = ((cls.usr - msg.data[2]) / cls.usr) * cls.max_temp
-            target_temp = (msg.data[1] / cls.usr) * cls.max_temp
             
-            mode = cls.Heater_Mode.NORMAL
-            d3 = msg.data[0]
-            if d3 == 25:
-                mode = cls.Heater_Mode.NIGHT_SET_BACK_4_DEGREES
-            elif d3 == 12:
-                mode = cls.Heater_Mode.STAND_BY_2_DEGREES
-            elif d3 == 0 and target_temp == 0:
-                mode = cls.Heater_Mode.OFF
+            # reversed range (from 40° to 0°)
+            current_temp = ((cls.usr - msg.data[2]) / cls.usr) * cls.max_cur_temp
+            # range from 8° to 30°
+            target_temp = (msg.data[1] / cls.usr) * (cls.max_des_temp - cls.min_des_temp)
 
-            return cls(mode, target_temp, current_temp, night_setback)
+            return cls(target_temp, current_temp)
         else:
             raise WrongOrgError
 
     def encode_message(self, address):
         data = bytearray([0, 0, 0, 0])
 
-        data[3] = 15
-        if self.stand_by:
-            data[3] = 14
+        # reversed range (from 40° to 0°)
+        data[2] = int((self.max_cur_temp - self.current_temperature) / self.max_cur_temp * self.usr)
+        # range from 8° to 30°
+        data[1] = int(self.target_temperature / (self.max_des_temp - self.min_des_temp) * self.usr)
+        
+        status = 0x00
+
+        return Regular4BSMessage(address, status, data, True)
+    
+    @property
+    def target_temperature(self):
+        return self._target_temp
+    
+    @property
+    def current_temperature(self):
+        return self._current_temp
+    
+    def __init__(self, target_temp:float=0, current_temp:float=0):
+        self._target_temp = target_temp
+        self._current_temp = current_temp
+
+
+class A5_10_03(_TempControl):
+    """Thermostat - current and desired temperature"""
+
+class _HeatingCooling(EEP):
+    min_temp:float = 0
+    max_temp:float = 40
+    usr:float = 255.0 # unscaled range 
+
+    class ControllerPriority(DefaultEnum):
+        ## TT = Target Temperature
+        ## CT = Current Temperature
+        AUTO = (1, 0x0E, 'Auto')                      # 00-TT-00-0E   no Priority (thermostat and controller have same prio)
+        HOME_AUTOMATION = (2, 0x08, 'Home Assistant') # 00-TT-00-08   only values from softare controller, registered in actuator, are considered 
+        THERMOSTAT = (3, 0x0E, 'Thermostat')          # 00-00-00-0E   only values from thermostat, registered in actuator, are considered (disables softeare controller)
+        LIMIT = (4, 0x0A, 'Limited Thermostat Range (±3°K)') # 00-TT-00-0A   Controller defines target temperature and thermostat can change it in a range of -3 to + 3 degree
+        ACTUATOR_ACK = (5, 0x0F, 'Actuator Response') # 00-TT-CT-0F
+
+        # DB0.1 = 1: no Prio [0E]
+        # DB0.1 = 0: Prio   [0A,08]
+        # DB0.2 = 1: limits thermostat range to +/-3°K [0A]
+
+    class HeaterMode(Enum):
+        NORMAL = 0x70                       # normal mode
+        STAND_BY_2_DEGREES = 0x30           # -2°K degree off-set mode              
+        NIGHT_SET_BACK_4_DEGREES = 0x50     # night set back (-4°K)
+        OFF = 0x10                          # Off
+        UNKNOWN = 0x00
+
+    @classmethod
+    def decode_message(cls, msg):
+        if msg.org == 0x07:
+
+            priority = cls.ControllerPriority.find_by_code(msg.data[3])
+            # reversed range (from 40° to 0°)
+            current_temp = ((cls.usr - msg.data[2]) / cls.usr) * cls.max_temp
+            target_temp = (msg.data[1] / cls.usr) * cls.max_temp
+            
+            try:
+                mode = cls.HeaterMode(msg.data[0])
+                if mode.value == 0 and target_temp == 0:
+                    mode = cls.HeaterMode.OFF
+            except:
+                mode = cls.HeaterMode.UNKNOWN
+
+            return cls(mode, target_temp, current_temp, priority)
+        else:
+            raise WrongOrgError
+
+    def encode_message(self, address):
+        data = bytearray([0, 0, 0, 0])
+
+        data[3] = self.priority.code
 
         # reversed range (from 40° to 0°)
         data[2] = int((self.max_temp - self.current_temperature) / self.max_temp * self.usr)
 
         data[1] = int(self.target_temperature / self.max_temp * self.usr)
         
-        data[0] = 0
-        if self.mode == _HeatingCooling.Heater_Mode.NIGHT_SET_BACK_4_DEGREES:
-            data[0] = 25
-        elif self.mode == _HeatingCooling.Heater_Mode.STAND_BY_2_DEGREES:
-            data[0] = 12
-        elif self.mode == _HeatingCooling.Heater_Mode.OFF:
-            data[1] = 0
+        data[0] = self.mode.value
         
-        status = 0x00
+        status = 0x80
 
         return Regular4BSMessage(address, status, data, True)
 
     @property
-    def mode(self):
+    def mode(self) -> HeaterMode:
         return self._mode
     
     @property
@@ -668,14 +759,14 @@ class _HeatingCooling(EEP):
         return self._current_temp
     
     @property
-    def stand_by(self):
-        return self._stand_by
+    def priority(self) -> ControllerPriority:
+        return self._priority
 
-    def __init__(self, mode: Heater_Mode, target_temp: float, current_temp: float, stand_by: bool):
+    def __init__(self, mode:HeaterMode=HeaterMode.NORMAL, target_temp:float=40, current_temp:float=min_temp, priority: ControllerPriority=ControllerPriority.AUTO):
         self._mode  = mode
         self._target_temp = target_temp
         self._current_temp = current_temp
-        self._stand_by = stand_by
+        self._priority = priority
 
 
 class A5_10_06(_HeatingCooling):
@@ -723,7 +814,7 @@ class _HeatingCoolingHumidity(EEP):
     def humidity(self):
         return self._humidity
     
-    def __init__(self, current_temperature, target_temperature, humidity):
+    def __init__(self, current_temperature:int=0, target_temperature:int=0, humidity:int=0):
         self._current_temperature = current_temperature
         self._target_temperature = target_temperature
         self._humidity = humidity
@@ -833,7 +924,7 @@ class _WeatherStation(EEP):
     def hemisphere(self):
         return self._hemisphere
 
-    def __init__(self, identifier, learn_button,
+    def __init__(self, identifier:int=1, learn_button:int=1,
         dawn_sensor=None, temperature=None, wind_speed=None, day_night=None, rain_indication=None,
         sun_west=None, sun_south=None, sun_east=None, hemisphere=None):
         self._dawn_sensor = dawn_sensor
@@ -878,7 +969,7 @@ class _TemperatureAndHumiditySensor(EEP):
         data = bytearray([0, 0, 0, 0])
         data[0] = 0x00
         data[1] = int((self.humidity / 100.0) * self.usr)
-        data[2] = int((self.current_temperature / (self.temp_max - self.temp_min)) * self.usr)
+        data[2] = int(((self.current_temperature - self.temp_min) / (self.temp_max - self.temp_min)) * self.usr)
         data[3] = (self.learn_button << 3)
         
         status = 0x00
@@ -897,7 +988,7 @@ class _TemperatureAndHumiditySensor(EEP):
     def learn_button(self):
         return self._learn_button
     
-    def __init__(self, temperature, humidity,learn_button):
+    def __init__(self, temperature:int=0, humidity:int=0, learn_button:int=1):
         self._temperature = temperature
         self._humidity = humidity
         self._learn_button = learn_button
@@ -954,7 +1045,7 @@ class _TemperatureAndHumiditySensor2(EEP):
     def learn_button(self):
         return self._learn_button
 
-    def __init__(self, temperature, humidity,learn_button, temp_availability):
+    def __init__(self, temperature:int=0, humidity:int=0, learn_button:int=1, temp_availability:int=1):
         self._temperature = temperature
         self._humidity = humidity
         self._learn_button = learn_button
@@ -1014,7 +1105,7 @@ class _TemperatureAndHumiditySensor3(EEP):
     def telegram_type(self):
         return self._telegram_type
     
-    def __init__(self, temperature, humidity,learn_button,telegram_type):
+    def __init__(self, temperature:int=-20, humidity:int=0, learn_button:int=1, telegram_type:int=1):
         self._temperature = temperature
         self._humidity = humidity
         self._learn_button = learn_button
@@ -1305,7 +1396,7 @@ class _BrightnessTwilightSensor(EEP):
     def illumination(self):
         return self._illumination
 
-    def __init__(self, twilight, day_light, illumination):
+    def __init__(self, twilight:int=0, day_light:int=300, illumination:int=300):
         self._twilight = twilight
         self._day_light = day_light
         self._illumination = illumination

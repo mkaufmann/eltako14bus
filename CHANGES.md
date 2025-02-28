@@ -2,6 +2,35 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## 0.0.74 Exception handling in serial thread extended
+
+## 0.0.73 Added functions for discovery of devices
+* Added functions for discovery of devices
+* fixed blocking sleep function
+
+## 0.0.68 Added helper functions for AddressExpression
+
+## 0.0.67 updates b2s so that other objects of the same address can be printed as well
+
+## 0.0.66 Fixed EEP A5-04-02 and added default values for EEPs
+
+## 0.0.65 Added command to query for gateway base id and version
+
+## 0.0.64 Refactored A5_10_06 (Heating and Cooling)
+* Refactored A5_10_06 (Heating and Cooling)
+* Cleaned up devices.py
+
+## 0.0.63 Write sender with EEP F6-02-01 into actuator improved.
+* Writing sender into actuator list with EEP F6-02-01/02. default: left push button
+
+## 0.0.62 Added device FSR14M-2x 
+
+## 0.0.61 Added EEP F6-01-01 for one-/push-button switch
+
+## 0.0.59 Added EPP A5-10-03 for thermostat
+
+## 0.0.57 Improved FTD14 handling
+
 ## 0.0.56 Added Sensor support for FTD14
 - Sensors/Memory list of FTD14 can be read out
 
